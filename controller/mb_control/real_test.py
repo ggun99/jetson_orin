@@ -23,6 +23,8 @@ import rclpy
 from rclpy.node import Node 
 from geometry_msgs.msg import Twist, Pose
 from sensor_msgs.msg import JointState
+from mocap4r2_msgs.msg import RigidBodies
+
 
 class QP_mbcontorller(Node):
     def __init__(self):
@@ -57,14 +59,66 @@ class QP_mbcontorller(Node):
         self.dt = 0.05
         # self.joint_subscription = self.create_subscription(JointState, '/ur5e_something', self.joint_sub, 10)
         # self.human_position = self.create_subscription(Pose, '/human_position', self.QP_real, 10)
-        self.human_position 
+        self.positions = self.create_subscription(RigidBodies, '/rigid_bodies', self.set_positions, 10)
+        self.create_timer(0.05, self.QP_real)  # 20Hz
         # 장애물의 비콘 위치
-        self.obstacles_positions
+        # self.obstacles_positions
         # 선의 비콘 위치
-        self.points_between
+        # self.points_between
         self.scout_publisher = self.create_publisher(Twist, '/scout_vel', 10)
         # self.ur5e_publisher = self.create_publisher(JointState, 'ur5e_vel', 10)
+        self.g_vec_f = None
+        self.len_cable = 0.02
+        self.w_obs = 0.00001
 
+    def set_positions(self, msg):
+        """
+        Set the positions of the rigid bodies from the message.
+        This function is called when a new message is received on the '/rigid_bodies' topic.
+        """
+        self.human_position = [msg.rigidbodies[0].pose.x, 
+                               msg.rigidbodies[0].pose.y, 
+                               msg.rigidbodies[0].pose.z]
+        self.obstacles_positions = [(msg.rigidbodies[1].markers[0].translation.x,
+                                    msg.rigidbodies[1].markers[0].translation.y,
+                                   msg.rigidbodies[1].markers[0].translation.z),
+                                   (msg.rigidbodies[1].markers[1].translation.x,
+                                    msg.rigidbodies[1].markers[1].translation.y,
+                                      msg.rigidbodies[1].markers[1].translation.z),
+                                      (msg.rigidbodies[1].markers[2].translation.x,
+                                       msg.rigidbodies[1].markers[2].translation.y,
+                                       msg.rigidbodies[1].markers[2].translation.z)]
+        self.points_between = [(msg.rigidbodies[2].markers[0].translation.x,
+                                msg.rigidbodies[2].markers[0].translation.y,
+                                msg.rigidbodies[2].markers[0].translation.z),
+                               (msg.rigidbodies[2].markers[1].translation.x,
+                                msg.rigidbodies[2].markers[1].translation.y,
+                                msg.rigidbodies[2].markers[1].translation.z),
+                               (msg.rigidbodies[2].markers[2].translation.x,
+                                msg.rigidbodies[2].markers[2].translation.y,
+                                msg.rigidbodies[2].markers[2].translation.z),
+                                (msg.rigidbodies[2].markers[3].translation.x,
+                                 msg.rigidbodies[2].markers[3].translation.y,
+                                 msg.rigidbodies[2].markers[3].translation.z),
+                                 (msg.rigidbodies[2].markers[4].translation.x,
+                                  msg.rigidbodies[2].markers[4].translation.y,
+                                  msg.rigidbodies[2].markers[4].translation.z),
+                                  (msg.rigidbodies[2].markers[5].translation.x,
+                                   msg.rigidbodies[2].markers[5].translation.y,
+                                   msg.rigidbodies[2].markers[5].translation.z),
+                                   (msg.rigidbodies[2].markers[6].translation.x,
+                                    msg.rigidbodies[2].markers[6].translation.y,
+                                    msg.rigidbodies[2].markers[6].translation.z),
+                                    (msg.rigidbodies[2].markers[7].translation.x,
+                                     msg.rigidbodies[2].markers[7].translation.y,
+                                     msg.rigidbodies[2].markers[7].translation.z),
+                                     (msg.rigidbodies[2].markers[8].translation.x,
+                                      msg.rigidbodies[2].markers[8].translation.y,
+                                      msg.rigidbodies[2].markers[8].translation.z),
+                                      (msg.rigidbodies[2].markers[9].translation.x,
+                                       msg.rigidbodies[2].markers[9].translation.y,
+                                       msg.rigidbodies[2].markers[9].translation.z)]
+    
     def joint_velocity_damper(self, 
             ps: float = 0.05,
             pi: float = 0.1,
@@ -327,13 +381,31 @@ class QP_mbcontorller(Node):
             rotation_matrix_normalized = U @ Vt
             T_bd[:3, :3] = rotation_matrix_normalized
 
-        T_sd[0, 3] = self.human_position[0] #robot_target_position[0]
-        T_sd[1, 3] = self.human_position[1] #robot_target_position[1]
-        T_sd[2, 3] = self.human_position[2] #robot_target_position[2]
+
+        # cur_p = human_sphere.get_world_pose()[0] # 변환된 사람 손의 위치 월드 기준.
+        cur_dp = H_current[:3, 3] # 현재 엔드 이펙터 위치 월드 기준.
+        d_vec = cur_p - cur_dp  # 현재 위치와 목표 위치 간의 벡터
+        d_vec_norm = np.linalg.norm(d_vec)  # 벡터의 크기
+        d_vec_unit = d_vec / d_vec_norm if d_vec_norm != 0 else np.zeros_like(d_vec)
+        if self.g_vec_f is not None:
+            print('g_vec_f:', self.g_vec_f)
+            # g_vec_f가 None이 아닐 때만 사용
+            T_sd[0, 3] = cur_dp[0] + self.g_vec_f[0] * self.w_obs + d_vec_unit[0] * self.len_cable
+            T_sd[1, 3] = cur_dp[1] + self.g_vec_f[1] * self.w_obs + d_vec_unit[1] * self.len_cable
+            T_sd[2, 3] = cur_dp[2] + self.g_vec_f[2] * self.w_obs + d_vec_unit[2] * self.len_cable
+        else:
+            T_sd[0, 3] = cur_dp[0] + d_vec_unit[0] * self.len_cable #human_error[0] * taken_t / moving_t  # 목표 x 위치
+            T_sd[1, 3] = cur_dp[1] + d_vec_unit[1] * self.len_cable #human_error[1] * taken_t / moving_t  # 목표 y 위치
+            T_sd[2, 3] = cur_dp[2] + d_vec_unit[2] * self.len_cable
+
+
+        # T_sd[0, 3] = self.human_position[0] #robot_target_position[0]
+        # T_sd[1, 3] = self.human_position[1] #robot_target_position[1]
+        # T_sd[2, 3] = self.human_position[2] #robot_target_position[2]
 
         
         # points_between에 있는 점들을 월드 좌표계로 변환하고 구를 생성
-        points_world = []:
+        points_world = self.points_between  # points_between의 점들을 복사
         # for i, point in enumerate(self.points_between):
         #     # 점을 월드 좌표계로 변환
         #     point_homogeneous = np.append(point, 1)  # 동차 좌표로 확장
@@ -491,6 +563,8 @@ class QP_mbcontorller(Node):
 
                 J_dj[:8] += A[i, :8] * w_p  # 베이스 조인트 속도에 대한 제약 조건
                 w_p_sum += w_p
+
+        self.g_vec_f = g_vec  # 마지막 장애물의 방향 벡터 저장
 
         C = np.concatenate((np.zeros(2), 8.0*J_m.reshape((self.n_dof - 2,)), np.zeros(6)))
         bTe = self.ur5e_robot.fkine(self.q[2:], include_base=False).A  
