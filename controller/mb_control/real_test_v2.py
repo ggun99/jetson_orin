@@ -81,31 +81,12 @@ class QP_mbcontorller(Node):
                 self.base_position = [msg.rigidbodies[i].pose.position.x,
                                       msg.rigidbodies[i].pose.position.y,
                                       msg.rigidbodies[i].pose.position.z]
-                
-                x = msg.rigidbodies[i].pose.orientation.x
-                y = msg.rigidbodies[i].pose.orientation.y
-                z = msg.rigidbodies[i].pose.orientation.z
-                w = msg.rigidbodies[i].pose.orientation.w
-                # 회전 행렬 만들기
-                rotation_matrix = np.array([
-                    [1, 0, 0],
-                    [0, 0, 1],
-                    [0, -1, 0]
-                ])
-
-                # 기존 쿼터니언을 회전 행렬로 변환
-                r = R.from_quat([x, y, z, w])  # 쿼터니언을 scipy Rotation 객체로 변환
-                rotated_matrix = r.as_matrix()  # 회전 행렬로 변환
-
-                # 회전 행렬에 변환 행렬을 곱해서 새로운 회전 행렬을 얻음
-                new_rotated_matrix = np.dot(rotation_matrix, rotated_matrix)
-
-                # 새로 변환된 회전 행렬을 다시 쿼터니언으로 변환
-                new_r = R.from_matrix(new_rotated_matrix)
-                new_q = new_r.as_quat()  # 새로운 쿼터니언 (x, y, z, w)
-                
-                self.base_quaternion = new_q
-                
+                self.base_quaternion = [
+                    msg.rigidbodies[i].pose.orientation.x,
+                    msg.rigidbodies[i].pose.orientation.y,
+                    msg.rigidbodies[i].pose.orientation.z,
+                    msg.rigidbodies[i].pose.orientation.w
+                ]
             elif msg.rigidbodies[i].rigid_body_name == '555':
                 self.robot_collision_check = [
                     (marker.translation.x, marker.translation.y, marker.translation.z)
@@ -258,28 +239,11 @@ class QP_mbcontorller(Node):
     #     self.q[0] = 0.0
     #     self.q[1] = 0.0 
     #     self.q[2:] = current_joint_positions[4:10]  # UR5e 조인트 위치
-#  -0.02652958  0.49744083]
-# human_position:  [0.0, -0.0, 0.0]
-# obstacle_position:  [0.45810791850090027, 2.6002590656280518, 0.38321441411972046]
-# base_position:  [0.8264958262443542, 0.6195293664932251, 0.7231231927871704]
-# base_quaternion:  [-0.0047586592845618725, -0.008662507869303226, -0.0016761287115514278, -0.9999498128890991]
-# robot_collision:  [(1.1585396528244019, 0.4129813611507416, 0.2596006691455841), (0.2861238121986389, 0.8374819755554199, 0.2598084509372711), (0.2876710593700409, 0.43267062306404114, 0.25981035828590393), (1.1655791997909546, 0.828036904335022, 0.25660502910614014)]
-# g_vec_f: [0.39584382 0.76448594 0.50879162]
-# qd: [ 0.1        -0.1         0.5        -0.5        -0.5        -0.5
+
 
 
     # 여기서 ros를 사용한 것으로 변경
     def QP_real(self):
-   
-        # 필요한 데이터가 모두 초기화되었는지 확인
-        if not hasattr(self, 'human_position') or self.human_position is None:
-            print("Waiting for position data...")
-            return
-        print('human_position: ', self.human_position)
-        print('obstacle_position: ', self.obstacles_positions)
-        print('base_position: ', self.base_position)
-        print('base_quaternion: ', self.base_quaternion)
-        print('robot_collision: ', self.robot_collision_check)
         t_start = self.rtde_c.initPeriod()
         # sub the joints values
         current_joint_positions = self.rtde_r.getActualQ() # 실제 현재 joint 위치
@@ -401,10 +365,10 @@ class QP_mbcontorller(Node):
 
         
         # points_between에 있는 점들을 월드 좌표계로 변환하고 구를 생성
-        # points_world = self.points_between  # points_between의 점들을 복사
+        points_world = self.points_between  # points_between의 점들을 복사
 
-        # points_world = np.array(points_world)  # (num_points, 3) 형태로 변환
-        # xform_pose = np.vstack((xform_pose, points_world))  # 현재 xform_pose에 점 추가
+        points_world = np.array(points_world)  # (num_points, 3) 형태로 변환
+        xform_pose = np.vstack((xform_pose, points_world))  # 현재 xform_pose에 점 추가
 
         T_bd = np.linalg.inv(T_sb) @ T_sd  
         # print("T_bd:", T_bd)
