@@ -20,6 +20,15 @@ from mocap4r2_msgs.msg import RigidBodies
 
 from tf2_ros import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
+from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import ColorRGBA
+import threading
+import sys
+import termios
+import tty
+
 
 class QP_mbcontorller(Node):
     def __init__(self):
@@ -34,7 +43,7 @@ class QP_mbcontorller(Node):
         self.rho_i = 0.9 # influence distance
         self.rho_s = 0.1  # safety factor
         self.eta = 1
-        self.qdlim = np.array([0.5]*8)
+        self.qdlim = np.array([0.3]*8)
         self.qdlim[:1] = 0.1  # 베이스 조인트 속도 제한
         self.qdlim[1] = 0.1
         self.qlim = np.array([[-np.inf, -np.inf, -3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265, -3.14159265],
@@ -51,25 +60,53 @@ class QP_mbcontorller(Node):
         self.dt = 0.05
         self.positions = self.create_subscription(RigidBodies, '/rigid_bodies', self.set_positions, 10)
         self.create_timer(0.05, self.QP_real)  # 20Hz
-        self.scout_publisher = self.create_publisher(Twist, '/scout_vel', 10)
+        self.scout_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         # self.ur5e_publisher = self.create_publisher(JointState, 'ur5e_vel', 10)
         self.g_vec_f = None
         self.len_cable = 0.02
         self.w_obs = 0.00001
         self.tf_broadcaster = StaticTransformBroadcaster(self)
-    
+        # self.human_position = None
+        self.obstacles_positions= None
+        self.points_between= None
+        self.base_quaternion= None
+        self.robot_collision_check= []
+        self.lower_marker_publisher = self.create_publisher(Marker, 'lower_visualization_marker', 10)
+        self.upper_marker_publisher = self.create_publisher(Marker, 'upper_visualization_marker', 10)
+        self.upper_base_pose_list = []
+        self.lower_base_pose_list = []
+        # self.timer = self.create_timer(1.0, self.publish_marker)  # 1초마다 퍼블리시
+        # keyboard publisher
+        self.pose_pub = self.create_publisher(PoseStamped, "marker_pose", 10)
+
+        # 마커 초기 위치
+        self.hand_pose = PoseStamped()
+        self.hand_pose_status = False
+        self.hand_pose.pose.position.x = 0.0
+        self.hand_pose.pose.position.y = 0.0
+        self.hand_pose.pose.position.z = 0.0
+        self.hand_pose.header.frame_id = "map"
+        self.ee_pose = None
+        # 키보드 입력을 별도 쓰레드에서 처리
+        thread = threading.Thread(target=self.keyboard_loop)
+        thread.daemon = True
+        thread.start()
+
     def set_positions(self, msg):
         """
         Set the positions of the rigid bodies from the message.
         This function is called when a new message is received on the '/rigid_bodies' topic.
         """
+        
         # 이름 확인해서 넣는걸로 
+
         for i in range(len(msg.rigidbodies)):
-            if msg.rigidbodies[i].rigid_body_name == '111':
-                self.human_position = [msg.rigidbodies[i].pose.position.x, 
-                                       msg.rigidbodies[i].pose.position.y, 
-                                       msg.rigidbodies[i].pose.position.z]
-            elif msg.rigidbodies[i].rigid_body_name == '222':
+            
+            # if msg.rigidbodies[i].rigid_body_name == '111':
+            #     self.human_position = [msg.rigidbodies[i].pose.position.x, 
+            #                            msg.rigidbodies[i].pose.position.y, 
+            #                            msg.rigidbodies[i].pose.position.z]
+            if msg.rigidbodies[i].rigid_body_name == '222':
                 self.obstacles_positions = [msg.rigidbodies[i].pose.position.x, 
                                        msg.rigidbodies[i].pose.position.y, 
                                        msg.rigidbodies[i].pose.position.z]
@@ -79,21 +116,115 @@ class QP_mbcontorller(Node):
                                         for marker in msg.rigidbodies[i].markers
                                     ]
             elif msg.rigidbodies[i].rigid_body_name == '444':
-                self.base_position = [msg.rigidbodies[i].pose.position.x,
-                                      msg.rigidbodies[i].pose.position.y,
-                                      msg.rigidbodies[i].pose.position.z]
+                # self.base_position = [msg.rigidbodies[i].pose.position.x,
+                #                       msg.rigidbodies[i].pose.position.y,
+                #                       msg.rigidbodies[i].pose.position.z]
                 self.base_quaternion = [
                     msg.rigidbodies[i].pose.orientation.x,
                     msg.rigidbodies[i].pose.orientation.y,
                     msg.rigidbodies[i].pose.orientation.z,
                     msg.rigidbodies[i].pose.orientation.w
                 ]
-                self.make_tf_msg(self.base_position, self.base_quaternion,"map", "base")
+                self.upper_base_pose_list = [
+                                        [marker.translation.x, marker.translation.y, marker.translation.z]
+                                        for marker in msg.rigidbodies[i].markers
+                                    ]
+                # self.make_tf_msg(self.base_position, self.base_quaternion,"map", "base")
             elif msg.rigidbodies[i].rigid_body_name == '555':
+                self.base_position = [msg.rigidbodies[i].pose.position.x,
+                                      msg.rigidbodies[i].pose.position.y,
+                                      msg.rigidbodies[i].pose.position.z]
                 self.robot_collision_check = [
                     (marker.translation.x, marker.translation.y, marker.translation.z)
                     for marker in msg.rigidbodies[i].markers
                 ]
+                self.lower_base_pose_list = [
+                                        [marker.translation.x, marker.translation.y, marker.translation.z]
+                                        for marker in msg.rigidbodies[i].markers
+                                    ]
+                # print('robot_coll: ', self.robot_collision_check)
+        self.publish_marker(self.lower_base_pose_list, "lower_base", 1, ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0), self.lower_marker_publisher)
+        self.publish_marker(self.upper_base_pose_list, "upper_base", 0, ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0), self.upper_marker_publisher)
+
+
+    def publish_marker(self, pos_list, marker_name, marker_id, marker_color, publisher):
+        marker = Marker()
+        marker.header.frame_id = "map"  # RViz에서 맞는 TF frame으로 변경
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = marker_name
+        marker.id = marker_id
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+
+        # scale: POINTS는 x,y 값이 width/height를 의미
+        marker.scale.x = 0.1  # 점의 가로 크기
+        marker.scale.y = 0.1  # 점의 세로 크기
+
+        # 색상 (전체 공통 색 지정 가능)
+        marker.color = marker_color  
+
+        # Points 추가
+        points = []
+        for i in range(len(pos_list)):
+            p = Point()
+            p.x = pos_list[i][0]
+            p.y = pos_list[i][1]
+            p.z = pos_list[i][2]
+            points.append(p)
+
+        marker.points = points
+
+        publisher.publish(marker)
+
+    def publish_pose(self):
+        self.pose_pub.publish(self.hand_pose)
+        self.get_logger().info(
+            f"x={self.hand_pose.pose.position.x:.2f}, "
+            f"y={self.hand_pose.pose.position.y:.2f}, "
+            f"z={self.hand_pose.pose.position.z:.2f}"
+        )
+        self.human_position = [self.hand_pose.pose.position.x,
+                               self.hand_pose.pose.position.y,
+                               self.hand_pose.pose.position.z]
+
+    def keyboard_loop(self):
+        if self.hand_pose_status is False and self.ee_pose is not None:
+            self.hand_pose.pose.position.x = self.ee_pose[0]
+            self.hand_pose.pose.position.y = self.ee_pose[1]
+            self.hand_pose.pose.position.z = self.ee_pose[2]
+            self.hand_pose_status = True
+            
+            print("Use WASD to move X/Y, QE to move Z. Ctrl+C to quit.")
+            print("W: +Y, S: -Y, A: -X, D: +X, Q: +Z, E: -Z")
+            settings = termios.tcgetattr(sys.stdin)
+
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                while True:
+                    key = sys.stdin.read(1)
+                    if key == 'w':
+                        self.hand_pose.pose.position.y += 0.1
+                    elif key == 's':
+                        self.hand_pose.pose.position.y -= 0.1
+                    elif key == 'a':
+                        self.hand_pose.pose.position.x -= 0.1
+                    elif key == 'd':
+                        self.hand_pose.pose.position.x += 0.1
+                    elif key == 'q':
+                        self.hand_pose.pose.position.z += 0.1
+                    elif key == 'e':
+                        self.hand_pose.pose.position.z -= 0.1
+                    elif key == '\x03':  # Ctrl+C
+                        break
+                    else:
+                        continue
+
+                    self.publish_pose()
+
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+        else:
+            return
 
     def joint_velocity_damper(self, 
             ps: float = 0.05,
@@ -268,51 +399,62 @@ class QP_mbcontorller(Node):
         self.q[1] = 0.0 
         self.q[2:] = current_joint_positions  # UR5e 조인트 위치
        
-        # xform_pose = np.array([rear_right_wheel_pose[0], rear_left_wheel_pose[0], front_right_wheel_pose[0], front_left_wheel_pose[0],
-        #                 ur5e_shoulder_pose[0], ur5e_upper_arm_pose[0], ur5e_forearm_pose[0], ur5e_wrist_1_pose[0], 
-        #                 ur5e_wrist_2_pose[0], ur5e_wrist_3_pose[0]])
         xform_pose = self.robot_collision_check
+        num_base = len(self.robot_collision_check)
 
         T_sb = np.eye(4)
         T_sb[0,3] = self.base_position[0]
         T_sb[1,3] = self.base_position[1] 
         T_sb[2,3] = self.base_position[2] 
         T_sb[:3, :3] = R.from_quat(self.base_quaternion).as_matrix() 
-        # T_b0 = np.eye(4)
-        # T_b0[0,3] = 0.1315 # 0.1015
-        # T_b0[2,3] = 0.51921  # 0.47921
-        fakeee = self.ur5e_robot.fkine([0]*6).A
-        fakep = list(fakeee[0:3,3])
-        fakeq = R.from_matrix(fakeee[0:3,0:3]).as_quat()
+        T_b0 = np.eye(4)
+        T_b0[0,3] = 0.1315 # 0.1015
+        T_b0[2,3] = 0.51921  # 0.47921
+
+        # fakeee = self.ur5e_robot.fkine([0]*6).A
+        # fakep = list(fakeee[0:3,3])
+        # fakeq = R.from_matrix(fakeee[0:3,0:3]).as_quat()
         # self.make_tf_msg(fakep, fakeq, "base", "ee_base_all0")
+        # print(T_be)
+        pppp = list(T_sb[0:3,3])
+        # print(pppp)
+        qqqq = R.from_matrix(T_sb[0:3,0:3]).as_quat()
+        # print(qqqq)
+        self.make_tf_msg(pppp, qqqq, "map", "base_world")
+
+        ppose = list(T_b0[0:3,3])
+        # print(pppp)
+        qqua = R.from_matrix(T_b0[0:3,0:3]).as_quat()
+        # print(qqqq)
+        self.make_tf_msg(ppose, qqua, "base_world", "base_0")
 
         # rot_mat = np.eye(4)
         # rot_mat[0,0] = -1.
         # rot_mat[1,1] = -1.
         # rot_mat[2,2] = 1.
-        T_be = self.ur5e_robot.fkine(self.q[2:]).A 
+        # print(self.q[2:])
+        T_0e = self.ur5e_robot.fkine(self.q[2:]).A 
+        # print(T_0e)
+        # ppppose = list(T_0e[0:3,3])
+        # # print(pppp)
+        # qqqqua = R.from_matrix(T_0e[0:3,0:3]).as_quat()
+        # # print(qqqq)
+        # self.make_tf_msg(ppppose, qqqqua, "base_0", "ee_0")
 
-        # rot_mat_y = np.eye(4)
-        # rot_mat_y[0,2] = 1.
-        # rot_mat_y[1,1] = 1.
-        # rot_mat_y[2,0] = -1.
+        T = T_b0 @ T_0e  # 베이스 프레임 기준 end-effector 위치
 
-        # rot_mat_z = np.eye(4)
-        # rot_mat_z[0,1] = 1.
-        # rot_mat_z[1,0] = -1.
-        # rot_mat_z[2,2] = 1.
-        correction = np.array([[ 0,  0,  1,  0],
-                            [-1,  0,  0,  0],
-                            [ 0, -1,  0,  0],
-                            [ 0,  0,  0,  1]])
+        # correction = np.array([[ 0,  0,  1,  0],
+        #                     [-1,  0,  0,  0],
+        #                     [ 0, -1,  0,  0],
+        #                     [ 0,  0,  0,  1]])
 
-        T_be = T_be @ correction
-        print(T_be)
-        pppp = list(T_be[0:3,3])
-        print(pppp)
-        qqqq = R.from_matrix(T_be[0:3,0:3]).as_quat()
-        print(qqqq)
-        self.make_tf_msg(pppp, qqqq, "base", "ee_base")
+        T_be = T #@ correction
+        # print(T_be)
+        pppose = list(T_be[0:3,3])
+        # print(pppp)
+        qqqua = R.from_matrix(T_be[0:3,0:3]).as_quat()
+        # print(qqqq)
+        self.make_tf_msg(pppose, qqqua, "base_world", "ee_base")
 
         H_current = SE3(T_be)  # 현재 end-effector 위치
         
@@ -329,14 +471,15 @@ class QP_mbcontorller(Node):
         # 로봇이 사람을 따라가기
         T_cur = T_sb @ T_be  # 현재 로봇 위치 (월드 좌표계 기준)
 
-        print(T_cur)
+        # print(T_cur)
         ppp = list(T_cur[0:3,3])
-        print(ppp)
+        # print(ppp)
         qqq = R.from_matrix(T_cur[0:3,0:3]).as_quat()
-        print(qqq)
+        # print(qqq)
         self.make_tf_msg(ppp, qqq, "map", "ee")
 
-
+        if self.ee_pose is None:
+            self.ee_pose = ppp
 
         # 엔드 이펙터의 변환 행렬
         T_e = T_cur  # 월드 좌표계에서 엔드 이펙터 좌표계로의 변환
@@ -440,7 +583,7 @@ class QP_mbcontorller(Node):
        
 
         T_error = np.linalg.inv(H_current.A) @ H_desired.A  # 4x4
-
+        # print(T_error)
         et = np.sum(np.abs(T_error[:3, -1])) 
 
         # Gain term (lambda) for control minimisation
@@ -498,7 +641,7 @@ class QP_mbcontorller(Node):
             min_dist_list.append(min_dist)  # 최소 거리 추가
             # print('min_dist', min_dist)
             
-            if i < 4:  # mobile base wheels
+            if i < num_base:  # mobile base wheels
             
                 position_homogeneous = np.append(pose, 1)  # 동차 좌표로 확장
                 position_local = np.linalg.inv(T_e) @ position_homogeneous
@@ -525,9 +668,9 @@ class QP_mbcontorller(Node):
                     print(f"A : {A[i, :8]}")
                     print(f"B : {B[i]:.2f}")
                     
-            elif 3 < i < 10:  # UR5e joints
+            elif (num_base-1) < i < (num_base+6):  # UR5e joints
                 
-                J_mb_arm_v = np.hstack([np.zeros((3, i - 2)), J_mb_v[:3, i - 2: ]])
+                J_mb_arm_v = np.hstack([np.zeros((3, i - num_base + 2)), J_mb_v[:3, i - num_base + 2: ]])
                 d_dot = (-g_vec) @ J_mb_arm_v
 
                 A[i, :8] = d_dot
@@ -564,7 +707,7 @@ class QP_mbcontorller(Node):
         self.g_vec_f = g_vec  # 마지막 장애물의 방향 벡터 저장
 
         C = np.concatenate((np.zeros(2), 8.0*J_m.reshape((self.n_dof - 2,)), np.zeros(6)))
-        bTe = self.ur5e_robot.fkine(self.q[2:], include_base=False).A  
+        bTe = self.ur5e_robot.fkine(self.q[2:], include_base=False).A #@ correction
         θε = atan2(bTe[1, -1], bTe[0, -1])
         # world에서 사람의 좌표 world_human_position에 넣어야함 (3,) vector
         weight_param = np.sum(np.abs(self.human_position - T_e[:3, 3]))
@@ -592,9 +735,9 @@ class QP_mbcontorller(Node):
 
         # Angular error
         e[3:] = base.tr2rpy(eTep, unit="rad", order="zyx", check=False)
-        # print(f"e: {e}")
+        print(f"e: {e}")
         k = np.eye(6)  # gain
-        k[:3,:] *= 8.0 # gain
+        # k[:3,:] *= 8.0 # gain
         v = k @ e
         v[3:] *= 1.3
 
@@ -617,16 +760,12 @@ class QP_mbcontorller(Node):
             qd = qd[: self.n_dof]
             # qd = 2 * qd
             # qd[:2] = 2 * qd[:2] 
-        elif 0.5 > et > 0.2 : 
+        elif 0.5 > et > 0.1 : 
             qd = qd[: self.n_dof]
-            # qd = 1.5 * qd
+            qd = 0.5 * qd
         else:
             qd = qd[: self.n_dof]
-            # qd[:2] = 0.5 * qd[:2] 
-
-            # qd[2:] = 0.5 * qd[2:]  # UR5e 조인트 속도 증가
-            # qd = 0.5 * qd
-            # print("et:", et)
+            qd = 0 * qd
 
         wc, vc = qd[0], qd[1]  # 베이스 속도
         qdc = qd[2:]
@@ -638,8 +777,8 @@ class QP_mbcontorller(Node):
         self.scout_publisher.publish(twist)
 
         # moving arm
-        # self.rtde_c.speedJ(qdc, 0.2, self.dt)
-        # self.rtde_c.waitPeriod(t_start)
+        self.rtde_c.speedJ(qdc, 0.2, self.dt)
+        self.rtde_c.waitPeriod(t_start)
 
         # joint_vel = JointState()
         # joint_vel.velocity = qd[2:]
@@ -648,6 +787,10 @@ class QP_mbcontorller(Node):
 if __name__ == '__main__':
     rclpy.init()
     node = QP_mbcontorller()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
