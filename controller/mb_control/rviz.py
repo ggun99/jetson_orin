@@ -480,6 +480,7 @@ class QP_mbcontorller(Node):
 
         if self.ee_pose is None:
             self.ee_pose = ppp
+            return
 
         # 엔드 이펙터의 변환 행렬
         T_e = T_cur  # 월드 좌표계에서 엔드 이펙터 좌표계로의 변환
