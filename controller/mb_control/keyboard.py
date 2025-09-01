@@ -146,6 +146,7 @@ class QP_mbcontorller(Node):
         )
 
     def keyboard_loop(self):
+        print('this')
         if self.hand_pose_status is False and self.ee_pose is not None:
             self.hand_pose.pose.position.x = self.ee_pose[0]
             self.hand_pose.pose.position.y = self.ee_pose[1]

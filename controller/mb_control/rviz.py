@@ -66,7 +66,7 @@ class QP_mbcontorller(Node):
         self.len_cable = 0.02
         self.w_obs = 0.00001
         self.tf_broadcaster = StaticTransformBroadcaster(self)
-        # self.human_position = None
+        self.human_position = None
         self.obstacles_positions= None
         self.points_between= None
         self.base_quaternion= None
@@ -183,48 +183,40 @@ class QP_mbcontorller(Node):
             f"y={self.hand_pose.pose.position.y:.2f}, "
             f"z={self.hand_pose.pose.position.z:.2f}"
         )
-        self.human_position = [self.hand_pose.pose.position.x,
-                               self.hand_pose.pose.position.y,
-                               self.hand_pose.pose.position.z]
+        
 
     def keyboard_loop(self):
-        if self.hand_pose_status is False and self.ee_pose is not None:
-            self.hand_pose.pose.position.x = self.ee_pose[0]
-            self.hand_pose.pose.position.y = self.ee_pose[1]
-            self.hand_pose.pose.position.z = self.ee_pose[2]
-            self.hand_pose_status = True
+        
             
-            print("Use WASD to move X/Y, QE to move Z. Ctrl+C to quit.")
-            print("W: +Y, S: -Y, A: -X, D: +X, Q: +Z, E: -Z")
-            settings = termios.tcgetattr(sys.stdin)
+        print("Use WASD to move X/Y, QE to move Z. Ctrl+C to quit.")
+        print("W: +Y, S: -Y, A: -X, D: +X, Q: +Z, E: -Z")
+        settings = termios.tcgetattr(sys.stdin)
 
-            try:
-                tty.setcbreak(sys.stdin.fileno())
-                while True:
-                    key = sys.stdin.read(1)
-                    if key == 'w':
-                        self.hand_pose.pose.position.y += 0.1
-                    elif key == 's':
-                        self.hand_pose.pose.position.y -= 0.1
-                    elif key == 'a':
-                        self.hand_pose.pose.position.x -= 0.1
-                    elif key == 'd':
-                        self.hand_pose.pose.position.x += 0.1
-                    elif key == 'q':
-                        self.hand_pose.pose.position.z += 0.1
-                    elif key == 'e':
-                        self.hand_pose.pose.position.z -= 0.1
-                    elif key == '\x03':  # Ctrl+C
-                        break
-                    else:
-                        continue
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while True:
+                key = sys.stdin.read(1)
+                if key == 'w':
+                    self.hand_pose.pose.position.y += 0.1
+                elif key == 's':
+                    self.hand_pose.pose.position.y -= 0.1
+                elif key == 'a':
+                    self.hand_pose.pose.position.x -= 0.1
+                elif key == 'd':
+                    self.hand_pose.pose.position.x += 0.1
+                elif key == 'q':
+                    self.hand_pose.pose.position.z += 0.1
+                elif key == 'e':
+                    self.hand_pose.pose.position.z -= 0.1
+                elif key == '\x03':  # Ctrl+C
+                    break
+                else:
+                    continue
 
-                    self.publish_pose()
+                self.publish_pose()
 
-            finally:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-        else:
-            return
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
 
     def joint_velocity_damper(self, 
             ps: float = 0.05,
@@ -480,7 +472,18 @@ class QP_mbcontorller(Node):
 
         if self.ee_pose is None:
             self.ee_pose = ppp
+        if self.hand_pose_status is False and self.ee_pose is not None:
+                    print('eepose', self.ee_pose)
+                    self.hand_pose.pose.position.x = self.ee_pose[0] + 0.2
+                    self.hand_pose.pose.position.y = self.ee_pose[1]
+                    self.hand_pose.pose.position.z = self.ee_pose[2]
+                    self.hand_pose_status = True
+        self.human_position = [self.hand_pose.pose.position.x,
+                               self.hand_pose.pose.position.y,
+                               self.hand_pose.pose.position.z]
+        if self.human_position is None:
             return
+        print('humanposition' , self.human_position)
 
         # 엔드 이펙터의 변환 행렬
         T_e = T_cur  # 월드 좌표계에서 엔드 이펙터 좌표계로의 변환
@@ -736,7 +739,7 @@ class QP_mbcontorller(Node):
 
         # Angular error
         e[3:] = base.tr2rpy(eTep, unit="rad", order="zyx", check=False)
-        print(f"e: {e}")
+        # print(f"e: {e}")
         k = np.eye(6)  # gain
         # k[:3,:] *= 8.0 # gain
         v = k @ e
@@ -751,7 +754,7 @@ class QP_mbcontorller(Node):
         
         # qd = [vc, wc, qd1, qd2, qd3, qd4, qd5, qd6]
         qd = qd[:8]
-        print(f"qd: {qd}")
+        # print(f"qd: {qd}")
 
         if qd is None:
             print("QP solution is None")
@@ -775,11 +778,11 @@ class QP_mbcontorller(Node):
         twist = Twist()
         twist.linear.x = vc
         twist.angular.z = wc
-        self.scout_publisher.publish(twist)
+        # self.scout_publisher.publish(twist)
 
         # moving arm
-        self.rtde_c.speedJ(qdc, 0.2, self.dt)
-        self.rtde_c.waitPeriod(t_start)
+        # self.rtde_c.speedJ(qdc, 0.2, self.dt)
+        # self.rtde_c.waitPeriod(t_start)
 
         # joint_vel = JointState()
         # joint_vel.velocity = qd[2:]
