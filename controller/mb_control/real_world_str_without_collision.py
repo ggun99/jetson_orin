@@ -11,6 +11,9 @@ import numpy as np
 import rtde_control
 import rtde_receive
 import cvxpy as cp
+import signal
+import sys
+import os
 
 import rclpy
 from rclpy.node import Node 
@@ -62,8 +65,8 @@ class QP_mbcontorller(Node):
         self.base_quaternion= None
         self.robot_collision_check= []
         self.lambda_h_a_param = 0.5
-        self.w1 = 0.5
-        self.w2 = 1.0
+        self.w1 = 1.0
+        self.w2 = 0.5
         self.w3 = 0.0
         self.w4 = 0.5
         # 로봇 링크별 충돌 검사 점들 정의
@@ -79,12 +82,16 @@ class QP_mbcontorller(Node):
             Int32, '/current_waypoint', self.current_waypoint_callback, 10)
         
         # 궤적 추종 상태 변수 (수정됨)
-        self.target_reached_threshold = 0.10  # 10cm 이내면 도달로 판단
+        self.target_reached_threshold = 0.05  # 10cm 이내면 도달로 판단
         self.target_reached = False
         self.current_waypoint_id = 0
         self.last_target_position = None  # 이전 목표 위치 저장
-        self.target_reached_debounce_time = 1.0  # 도달 판정 후 1초 디바운스
+        self.target_reached_debounce_time = 0.2  # 도달 판정 후 1초 디바운스
         self.target_reached_time = None
+        
+        # End effector 궤적 기록용
+        self.ee_trajectory = {'x': [], 'y': [], 'timestamps': []}
+        self.start_time = time.time()
         
         print("🎯 궤적 추종 시스템 초기화 완료")
 
@@ -193,6 +200,8 @@ class QP_mbcontorller(Node):
             return False
         
         distance = np.linalg.norm(np.array(current_pos) - np.array(target_pos))
+        self.get_logger().info(f"Distance to target: {distance:.3f} m")
+        self.get_logger().info(f"Current Pos: ({current_pos[0]:.3f}, {current_pos[1]:.3f}, {current_pos[2]:.3f})")
         return distance < self.target_reached_threshold
     
     def should_trigger_next_waypoint(self, current_ee_pos):
@@ -291,7 +300,7 @@ class QP_mbcontorller(Node):
         self.base_position = [msg.position.x,
                             msg.position.y,
                             msg.position.z]
-        self.get_logger().info(f"Base position updated: {self.base_position}")
+        # self.get_logger().info(f"Base position updated: {self.base_position}")
         self.base_quaternion = [
                     msg.orientation.x,
                     msg.orientation.y,
@@ -451,6 +460,24 @@ class QP_mbcontorller(Node):
     #     self.q[0] = 0.0
     #     self.q[1] = 0.0 
     #     self.q[2:] = current_joint_positions[4:10]  # UR5e 조인트 위치
+    def calculate_natural_rotation(self, T_cur, target_position):
+
+        cur_z_axis = T_cur[:3, 2]
+        current_position = T_cur[:3, 3]
+        direction_vector = target_position - current_position
+        direction_vector /= np.linalg.norm(direction_vector)
+        
+        new_z_axis = direction_vector
+        new_y_axis = np.cross(cur_z_axis, new_z_axis)
+        if np.linalg.norm(new_y_axis) < 1e-6:
+            new_y_axis = np.array([0, 1, 0])
+        new_y_axis /= np.linalg.norm(new_y_axis)
+        
+        new_x_axis = np.cross(new_y_axis, new_z_axis)
+        new_x_axis /= np.linalg.norm(new_x_axis)
+        
+        rotation_matrix = np.vstack([new_x_axis, new_y_axis, new_z_axis]).T
+        return rotation_matrix
 
     def make_tf_msg(self, pos, quat, parent_name, child_frame_name):
         tfmsg = TransformStamped()
@@ -561,6 +588,12 @@ class QP_mbcontorller(Node):
         # 현재 엔드이펙터 위치
         current_ee_position = T_cur[:3, 3]
         
+        # End effector 궤적 기록
+        current_time = time.time() - self.start_time
+        self.ee_trajectory['x'].append(current_ee_position[0])
+        self.ee_trajectory['y'].append(current_ee_position[1])
+        self.ee_trajectory['timestamps'].append(current_time)
+        
         # 실제 위치 기반 다음 웨이포인트 트리거 확인
         if self.should_trigger_next_waypoint(current_ee_position):
             print("🚀 next_waypoint_trigger 발송!")
@@ -584,53 +617,7 @@ class QP_mbcontorller(Node):
                 print(f"\n📊 [실시간 상태]")
                 print(f"   현재 EE: ({current_ee_position[0]:.3f}, {current_ee_position[1]:.3f}, {current_ee_position[2]:.3f})")
                 print(f"   목표 위치: ({self.human_position[0]:.3f}, {self.human_position[1]:.3f}, {self.human_position[2]:.3f})")
-                print(
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    f"   거리: {distance_to_target*1000:.1f}mm (임계값: {self.target_reached_threshold*1000:.0f}mm)")
+                print(f"   거리: {distance_to_target*1000:.1f}mm (임계값: {self.target_reached_threshold*1000:.0f}mm)")
                 print(f"   웨이포인트: {self.current_waypoint_id}")
                 print(f"   도달상태: {self.target_reached}")
                 
@@ -652,37 +639,30 @@ class QP_mbcontorller(Node):
         # 엔드 이펙터의 변환 행렬
         T_e = T_cur  # 월드 좌표계에서 엔드 이펙터 좌표계로의 변환
 
-        # robot_target_position을 엔드 이펙터 좌표계로 변환
-        robot_target_position_homogeneous = np.append(self.human_position, 1)  # 동차 좌표로 확장
-        robot_target_position_local = np.linalg.inv(T_e) @ robot_target_position_homogeneous
-        robot_target_position_local = robot_target_position_local[:3]  # 3차원으로 변환
+        # # robot_target_position을 엔드 이펙터 좌표계로 변환
+        # robot_target_position_homogeneous = np.append(self.human_position, 1)  # 동차 좌표로 확장
+        # robot_target_position_local = np.linalg.inv(T_e) @ robot_target_position_homogeneous
+        # robot_target_position_local = robot_target_position_local[:3]  # 3차원으로 변환
 
-        # 현재 엔드 이펙터 위치를 엔드 이펙터 좌표계로 변환 (항상 원점)
+        # # 현재 엔드 이펙터 위치를 엔드 이펙터 좌표계로 변환 (항상 원점)
 
-        # 목표 방향 계산 (엔드 이펙터 좌표계 기준)
-        direction_vector = robot_target_position_local # - cur_p_local
-        direction_vector /= np.linalg.norm(direction_vector)  # 방향 벡터 정규화
+        # # 목표 방향 계산 (엔드 이펙터 좌표계 기준)
+        # direction_vector = robot_target_position_local # - cur_p_local
+        # direction_vector /= np.linalg.norm(direction_vector)  # 방향 벡터 정규화
 
-        # 로봇의 현재 x축 방향 (엔드 이펙터의 x축)
-        current_x_axis = T_e[:3, 0]  # 엔드 이펙터 변환 행렬의 첫 번째 열
+        # # 로봇의 현재 x축 방향 (엔드 이펙터의 x축)
+        # current_x_axis = T_e[:3, 0]  # 엔드 이펙터 변환 행렬의 첫 번째 열
 
-        # 엔드 이펙터 기준의 방향 벡터 (direction_vector)를 월드 좌표계로 변환
-        direction_vector_homogeneous = np.append(direction_vector, 0)  # 방향 벡터는 동차 좌표로 확장 (위치가 아니므로 마지막 값은 0)
-        direction_vector_world = T_e[:3, :3] @ direction_vector_homogeneous[:3]  # 회전 행렬만 적용하여 월드 좌표계로 변환
+        # # 엔드 이펙터 기준의 방향 벡터 (direction_vector)를 월드 좌표계로 변환
+        # direction_vector_homogeneous = np.append(direction_vector, 0)  # 방향 벡터는 동차 좌표로 확장 (위치가 아니므로 마지막 값은 0)
+        # direction_vector_world = T_e[:3, :3] @ direction_vector_homogeneous[:3]  # 회전 행렬만 적용하여 월드 좌표계로 변환
 
-        # z_axis를 월드 좌표계 기준으로 설정
-        z_axis = direction_vector_world / np.linalg.norm(direction_vector_world)  # 정규화
-
-        # y축은 현재 x축 방향과 z축의 외적
-        y_axis = np.cross(current_x_axis, z_axis)
-        y_axis /= np.linalg.norm(y_axis)  # 정규화
-
-        # x축은 y축과 z축의 외적
-        x_axis = np.cross(z_axis, y_axis)
-        x_axis /= np.linalg.norm(x_axis)  # 정규화
+        if self.human_position is None:
+            print('No Desired Position')
+            return
 
         # 회전 행렬 생성
-        rotation_matrix = np.vstack([z_axis, y_axis, x_axis]).T
+        rotation_matrix = self.calculate_natural_rotation(T_cur, self.human_position)
 
         # 로봇의 목표 위치 설정
         T_sd = np.eye(4)
@@ -777,53 +757,7 @@ class QP_mbcontorller(Node):
         A = np.zeros((self.n_dof + 2 + self.num_points, self.n_dof + 6))
         B = np.zeros(self.n_dof + 2 + self.num_points)
         # print(f"Ashape: {A.shape}, B shape: {B.shape}")
-
-        J_dj = np.zeros(self.n_dof+6)
-        w_p_sum = 0.0
-        min_dist_list = []  # 장애물과의 최소 거리 리스트
-        print('xform_pose', xform_pose.shape)
-        for i , pose in enumerate(xform_pose) :
-
-            distance, index, g_vec = self.get_nearest_obstacle_distance(pose, [self.obstacles_positions], self.obstacle_radius, T_cur)
-            min_dist = np.min(distance)
-            min_dist_list.append(min_dist)  # 최소 거리 추가
-            # print('min_dist', min_dist)
-            # print('num_mobile', num_mobile)
-            if i < num_mobile:  # mobile base wheels
-            
-                position_homogeneous = np.append(pose, 1)  # 동차 좌표로 확장
-                position_local = np.linalg.inv(T_e) @ position_homogeneous
-                position_local = position_local[:3]  # 3차원으로 변환
-                dist_T = np.eye(4)
-                dist_T[:3, 3] = position_local
-
-                d_dot = (g_vec) @ J_mb_v # J_mb_arm_v_
-                
-                A[i, :8] = -d_dot 
-                A[i, 8:] = np.zeros((1, 6)) 
-                B[i] = (min_dist_list[i] - self.d_safe) / (self.d_influence - self.d_safe) 
-                w_p = (self.d_influence-min_dist_list[i])/(self.d_influence - self.d_safe) 
-                J_dj[:8] += (-d_dot) * w_p  # 베이스 조인트 속도에 대한 제약 조건
-                w_p_sum += np.abs(w_p)
-
-                    
-            else:  # UR5e joints + cable points
-                
-                J_mb_arm_v = np.hstack([np.zeros((3, i - num_mobile + 2)), J_a_e[:3, i - num_mobile + 2: ]])
-                J_p_v = J_p[:3, :]
-                print('J_mb_arm_v', J_mb_arm_v.shape)
-                print('J_p_v', J_p_v.shape)
-                J_mb_m_a = np.hstack((J_p_v, J_mb_arm_v))
-                d_dot = (g_vec) @ J_mb_m_a
-
-                A[i, :8] = -d_dot
-                A[i, 8:] = np.zeros((1, 6)) 
-                B[i] = (min_dist_list[i] - self.d_safe) / (self.d_influence - self.d_safe)
-                w_p = (self.d_influence-min_dist_list[i])/(self.d_influence - self.d_safe) 
-                J_dj[:8] += (-d_dot) * (w_p)  #  #  # 베이스 조인트 속도에 대한 제약 조건
-                w_p_sum += w_p
-
-
+        
         C1 = np.concatenate((np.zeros(2), -J_m.reshape((self.n_dof - 2,)), np.zeros(6)))
         bTe = self.ur5e_robot.fkine(self.q[2:], include_base=False).A 
         θε = atan2(bTe[1, -1], bTe[0, -1])
@@ -840,13 +774,7 @@ class QP_mbcontorller(Node):
 
         # 장애물 회피 (간단화)
         C3 = np.zeros(self.n_dof + 6)
-        min_distance = np.min(min_dist_list)  # 장애물과의 최소 거리
-        if min_distance <= self.d_influence :
-            lambda_c = (self.lambda_max /(self.d_influence - self.d_safe)**2) * (min_distance - self.d_influence)**2
-        else:
-            lambda_c = 0.0
-        J_c = lambda_c * J_dj/w_p_sum
-        C3 = J_c
+    
         
         # 회전 제어 항
         J_h = np.zeros(self.n_dof + 6)
@@ -906,18 +834,19 @@ class QP_mbcontorller(Node):
         if x_.value is not None:
             qd = x_.value
         else:
+            print("QP solution is None")
             qd = np.zeros(self.n_dof+6)
 
         if et > 0.5:
             qd = qd[: self.n_dof]
             
-        elif et> 0.1:
+        elif et < 0.05:
             qd = qd[: self.n_dof]
             qd = 0 * qd
 
         wc, vc = qd[0], qd[1]  # 베이스 속도
         qdc = qd[2:]
-        print('qd:', qd)
+        # print('qd:', qd)
         # moving base
         twist = Twist()
         twist.linear.x = vc
@@ -932,9 +861,150 @@ class QP_mbcontorller(Node):
         # joint_vel.velocity = qd[2:]
         # self.ur5e_publisher.publish(joint_vel)
 
+    def save_ee_trajectory(self):
+        """End effector 궤적을 파일로 저장"""
+        if len(self.ee_trajectory['x']) == 0:
+            print("📊 기록된 궤적이 없습니다.")
+            return
+            
+        # 저장 디렉토리 생성
+        save_dir = "/home/nvidia/geon/robotics/jetson_orin/controller/mb_control/trajectory_plots"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 타임스탬프로 파일명 생성
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        
+        # matplotlib 백엔드를 'Agg'로 설정 (GUI 없이 파일로만 저장)
+        plt.switch_backend('Agg')
+        
+        plt.figure(figsize=(12, 8))
+        
+        # 궤적 플롯
+        plt.subplot(2, 2, 1)
+        plt.plot(self.ee_trajectory['x'], self.ee_trajectory['y'], 'b-', linewidth=2, alpha=0.7, label='EE Trajectory')
+        plt.scatter(self.ee_trajectory['x'][0], self.ee_trajectory['y'][0], 
+                   color='green', s=100, marker='o', label='Start', zorder=5)
+        plt.scatter(self.ee_trajectory['x'][-1], self.ee_trajectory['y'][-1], 
+                   color='red', s=100, marker='s', label='End', zorder=5)
+        plt.xlabel('X Position (m)')
+        plt.ylabel('Y Position (m)')
+        plt.title('End Effector XY Trajectory')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.axis('equal')
+        
+        # X 좌표 시간 변화
+        plt.subplot(2, 2, 2)
+        plt.plot(self.ee_trajectory['timestamps'], self.ee_trajectory['x'], 'r-', linewidth=2)
+        plt.xlabel('Time (s)')
+        plt.ylabel('X Position (m)')
+        plt.title('X Position vs Time')
+        plt.grid(True, alpha=0.3)
+        
+        # Y 좌표 시간 변화
+        plt.subplot(2, 2, 3)
+        plt.plot(self.ee_trajectory['timestamps'], self.ee_trajectory['y'], 'g-', linewidth=2)
+        plt.xlabel('Time (s)')
+        plt.ylabel('Y Position (m)')
+        plt.title('Y Position vs Time')
+        plt.grid(True, alpha=0.3)
+        
+        # 속도 분석
+        plt.subplot(2, 2, 4)
+        if len(self.ee_trajectory['x']) > 1:
+            dx = np.diff(self.ee_trajectory['x'])
+            dy = np.diff(self.ee_trajectory['y'])
+            dt = np.diff(self.ee_trajectory['timestamps'])
+            dt[dt == 0] = 1e-6  # divide by zero 방지
+            
+            vx = dx / dt
+            vy = dy / dt
+            v_magnitude = np.sqrt(vx**2 + vy**2)
+            
+            plt.plot(self.ee_trajectory['timestamps'][1:], v_magnitude, 'purple', linewidth=2)
+            plt.xlabel('Time (s)')
+            plt.ylabel('Velocity Magnitude (m/s)')
+            plt.title('EE Velocity Magnitude')
+            plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # 그래프 저장
+        plot_filename = f"{save_dir}/ee_trajectory_{timestamp}.png"
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 데이터 CSV로 저장
+        csv_filename = f"{save_dir}/ee_trajectory_{timestamp}.csv"
+        with open(csv_filename, 'w') as f:
+            f.write("timestamp,x_position,y_position\n")
+            for i in range(len(self.ee_trajectory['x'])):
+                f.write(f"{self.ee_trajectory['timestamps'][i]:.3f},"
+                       f"{self.ee_trajectory['x'][i]:.6f},"
+                       f"{self.ee_trajectory['y'][i]:.6f}\n")
+        
+        # 통계 정보 출력 및 저장
+        total_distance = 0
+        if len(self.ee_trajectory['x']) > 1:
+            for i in range(1, len(self.ee_trajectory['x'])):
+                dx = self.ee_trajectory['x'][i] - self.ee_trajectory['x'][i-1]
+                dy = self.ee_trajectory['y'][i] - self.ee_trajectory['y'][i-1]
+                total_distance += np.sqrt(dx**2 + dy**2)
+        
+        x_range = max(self.ee_trajectory['x']) - min(self.ee_trajectory['x'])
+        y_range = max(self.ee_trajectory['y']) - min(self.ee_trajectory['y'])
+        total_time = self.ee_trajectory['timestamps'][-1] - self.ee_trajectory['timestamps'][0]
+        
+        stats_filename = f"{save_dir}/ee_trajectory_stats_{timestamp}.txt"
+        stats_info = f"""End Effector 궤적 통계 정보
+=====================================
+기록 시간: {timestamp}
+총 이동 거리: {total_distance:.3f} m
+X 축 범위: {x_range:.3f} m
+Y 축 범위: {y_range:.3f} m
+총 시간: {total_time:.1f} s
+평균 속도: {total_distance/max(total_time, 1e-6):.3f} m/s
+기록된 포인트 수: {len(self.ee_trajectory['x'])} 개
+"""
+        
+        with open(stats_filename, 'w') as f:
+            f.write(stats_info)
+        
+        print(f"\n📊 End Effector 궤적 저장 완료:")
+        print(f"   그래프: {plot_filename}")
+        print(f"   데이터: {csv_filename}")
+        print(f"   통계: {stats_filename}")
+        print(f"   총 이동 거리: {total_distance:.3f} m")
+        print(f"   X 축 범위: {x_range:.3f} m")
+        print(f"   Y 축 범위: {y_range:.3f} m")
+        print(f"   총 시간: {total_time:.1f} s")
+        print(f"   평균 속도: {total_distance/max(total_time, 1e-6):.3f} m/s")
+        print(f"   기록된 포인트 수: {len(self.ee_trajectory['x'])} 개")
+
+    def cleanup_and_plot(self):
+        """정리 작업 및 궤적 저장"""
+        print("\n🛑 프로그램 종료 중...")
+        self.save_ee_trajectory()
+
+def signal_handler(sig, frame):
+    """시그널 핸들러 - Ctrl+C 처리"""
+    global node
+    if 'node' in globals():
+        node.cleanup_and_plot()
+    sys.exit(0)
+
 if __name__ == '__main__':
+    # 시그널 핸들러 등록
+    signal.signal(signal.SIGINT, signal_handler)
+    
     rclpy.init()
     node = QP_mbcontorller()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("\n🛑 Ctrl+C 감지됨")
+    finally:
+        node.cleanup_and_plot()
+        node.destroy_node()
+        rclpy.shutdown()

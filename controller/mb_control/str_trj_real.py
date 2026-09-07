@@ -27,6 +27,7 @@ class TrajectoryPublisher(Node):
         self.trajectory_active = True  # 항상 활성화 (목표 위치만 계속 발행)
         self.waypoint_reached = False
         self.waiting_for_robot = False  # 로봇이 도달하기를 기다리는 상태
+        self.trajectory_completed = False  # 전체 궤적 완료 상태
         
         print("🚀 x축 20cm 단위 궤적 발행 노드 시작 (외부 트리거 전용)")
         print("📋 로봇이 목표에 도달해야 다음 포인트로 이동합니다")
@@ -49,11 +50,11 @@ class TrajectoryPublisher(Node):
         """20cm 단위 직선 궤적들 정의"""
         
         # x축을 따라 이동하는 20cm 단위 직선 궤적들
-        base_y = 1.0  # y 좌표 고정
-        base_z = 1.2  # z 좌표 고정
+        base_y = -0.  # y 좌표 고정
+        base_z = 0.9  # z 좌표 고정
         
         # x축 범위: 0.5 → 2.5 (총 2.0m를 20cm 단위로 분할)
-        x_positions = np.arange(0.5, 2.7, 0.2)  # [0.5, 0.7, 0.9, ..., 2.5]
+        x_positions = np.arange(2.0, 2.6, 0.05)  # [0.5, 0.7, 0.9, ..., 2.5]
         
         self.trajectories = []
         
@@ -122,13 +123,36 @@ class TrajectoryPublisher(Node):
     def move_to_next_waypoint(self):
         """다음 웨이포인트로 이동"""
         prev_trajectory = self.current_trajectory
-        self.current_trajectory = (self.current_trajectory + 1) % len(self.trajectories)
         
         if len(self.trajectories) > 0:
-            current_waypoint = self.trajectories[self.current_trajectory]
             prev_waypoint = self.trajectories[prev_trajectory]
-            
             print(f"✅ 웨이포인트 {prev_trajectory} 완료: {prev_waypoint['name']}")
+            
+            # 마지막 웨이포인트 확인
+            if self.current_trajectory >= len(self.trajectories) - 1:
+                print("🏁 모든 웨이포인트 완료! 프로그램을 종료합니다.")
+                self.trajectory_completed = True
+                self.trajectory_active = False
+                
+                # 최종 완료 상태 발행
+                completion_msg = Bool()
+                completion_msg.data = True
+                self.trajectory_status_publisher.publish(completion_msg)
+                
+                # 프로그램 종료
+                import threading
+                def shutdown_delayed():
+                    time.sleep(2.0)  # 2초 후 종료
+                    rclpy.shutdown()
+                
+                shutdown_thread = threading.Thread(target=shutdown_delayed)
+                shutdown_thread.start()
+                return
+            
+            # 다음 웨이포인트로 이동
+            self.current_trajectory += 1
+            current_waypoint = self.trajectories[self.current_trajectory]
+            
             print(f"➡️ 다음 웨이포인트: {self.current_trajectory} - {current_waypoint['name']}")
             print(f"   새 목표: x: {current_waypoint['position'][0]:.1f}")
             
@@ -151,7 +175,7 @@ class TrajectoryPublisher(Node):
 
     def publish_current_target(self):
         """현재 목표 위치를 계속 발행"""
-        if not self.trajectory_active or len(self.trajectories) == 0:
+        if not self.trajectory_active or len(self.trajectories) == 0 or self.trajectory_completed:
             return
         
         current_waypoint = self.trajectories[self.current_trajectory]
